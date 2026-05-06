@@ -1,0 +1,15 @@
+services:
+  mocklab:
+    build: .
+    ports:
+      - "7394:7394"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 7394
+      DATABASE_PATH: /data/mocklab.sqlite
+      MAX_BODY_BYTES: 52428800
+    volumes:
+      - mocklab-data:/data
+
+volumes:
+  mocklab-data:

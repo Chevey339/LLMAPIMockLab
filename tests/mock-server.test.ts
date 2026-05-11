@@ -48,6 +48,12 @@ describe("request capture", () => {
 });
 
 describe("rules engine", () => {
+  it("marks admin API responses as no-store", async () => {
+    const response = await app.inject({ method: "GET", url: "/_mock/api/rules" });
+
+    expect(response.headers["cache-control"]).toBe("no-store");
+  });
+
   it("uses the highest-priority enabled matching rule", async () => {
     await app.inject({
       method: "POST",

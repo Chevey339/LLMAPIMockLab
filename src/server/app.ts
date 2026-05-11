@@ -56,6 +56,13 @@ async function registerStaticUi(app: FastifyInstance): Promise<void> {
 }
 
 function registerAdminRoutes(app: FastifyInstance, db: AppDatabase): void {
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (request.url.startsWith("/_mock/api/")) {
+      reply.header("cache-control", "no-store");
+    }
+    return payload;
+  });
+
   app.get("/_mock/api/requests", async (request) => {
     const limit = Number((request.query as Record<string, unknown>).limit ?? 200);
     return { items: db.listRequests(limit) };

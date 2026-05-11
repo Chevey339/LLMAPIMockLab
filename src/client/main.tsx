@@ -1,7 +1,7 @@
 import { Activity, Braces, Check, Copy, Database, FileDown, ListFilter, Play, Plus, RefreshCcw, Save, Settings, Trash2, Workflow } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { removeRuleImmediately, upsertRuleImmediately } from "./ruleState.js";
+import { mergeRulesPreservingPending, removeRuleImmediately, settlePendingRuleIds, upsertRuleImmediately } from "./ruleState.js";
 import "./styles.css";
 
 type Tab = "requests" | "rules" | "providers" | "settings";
@@ -40,6 +40,13 @@ type MockRule = {
   delayMs: number;
 };
 
+type ActionStatus = {
+  kind: "idle" | "busy" | "success" | "error";
+  message: string;
+};
+
+const idleStatus: ActionStatus = { kind: "idle", message: "" };
+
 function App() {
   const [tab, setTab] = useState<Tab>("requests");
   const [requests, setRequests] = useState<CapturedRequest[]>([]);
@@ -48,6 +55,11 @@ function App() {
   const selectedIdRef = useRef<number | null>(null);
   const [selectedRuleId, setSelectedRuleId] = useState<number | null>(null);
   const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<ActionStatus>(idleStatus);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const pendingRuleUpsertsRef = useRef(new Set<number>());
+  const pendingRuleDeletesRef = useRef(new Set<number>());
+  const refreshSeqRef = useRef(0);
 
   const selected = useMemo(() => requests.find((item) => item.id === selectedId) ?? requests[0], [requests, selectedId]);
   const filtered = useMemo(() => {
@@ -56,89 +68,135 @@ function App() {
     return requests.filter((item) => `${item.provider} ${item.method} ${item.path} ${item.rawBody} ${item.responseBody}`.toLowerCase().includes(needle));
   }, [requests, query]);
 
-  async function refresh() {
-    const [requestData, ruleData] = await Promise.all([
-      fetch("/_mock/api/requests").then((res) => res.json()),
-      fetch("/_mock/api/rules").then((res) => res.json())
-    ]);
-    setRequests(requestData.items);
-    setRules(ruleData.items);
-    const current = selectedIdRef.current;
-    if (current && requestData.items.some((item: CapturedRequest) => item.id === current)) {
-      return;
-    }
-    if (!current && requestData.items[0]) {
-      selectedIdRef.current = requestData.items[0].id;
-      setSelectedId(requestData.items[0].id);
+  async function refresh(options: { silent?: boolean } = {}) {
+    const seq = ++refreshSeqRef.current;
+    if (!options.silent) setBusyAction("refresh");
+    try {
+      const [requestData, ruleData] = await Promise.all([
+        adminFetch("/_mock/api/requests").then((res) => res.json()),
+        adminFetch("/_mock/api/rules").then((res) => res.json())
+      ]);
+      if (seq !== refreshSeqRef.current) return;
+      const settled = settlePendingRuleIds(ruleData.items, pendingRuleUpsertsRef.current, pendingRuleDeletesRef.current);
+      pendingRuleUpsertsRef.current = settled.pendingUpsertIds;
+      pendingRuleDeletesRef.current = settled.pendingDeletedIds;
+      setRequests(requestData.items);
+      setRules((current) =>
+        mergeRulesPreservingPending(current, ruleData.items, pendingRuleUpsertsRef.current, pendingRuleDeletesRef.current)
+      );
+      const current = selectedIdRef.current;
+      if (current && requestData.items.some((item: CapturedRequest) => item.id === current)) {
+        if (!options.silent) setStatus({ kind: "success", message: "Refreshed" });
+        return;
+      }
+      if (!current && requestData.items[0]) {
+        selectedIdRef.current = requestData.items[0].id;
+        setSelectedId(requestData.items[0].id);
+      }
+      if (!options.silent) setStatus({ kind: "success", message: "Refreshed" });
+    } catch (error) {
+      if (!options.silent) {
+        setStatus({ kind: "error", message: error instanceof Error ? error.message : "Refresh failed" });
+      }
+    } finally {
+      if (!options.silent) setBusyAction((current) => (current === "refresh" ? null : current));
     }
   }
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 2500);
+    void refresh({ silent: true });
+    const timer = window.setInterval(() => void refresh({ silent: true }), 2500);
     return () => window.clearInterval(timer);
   }, []);
 
   async function clearRequests() {
-    await fetch("/_mock/api/requests", { method: "DELETE" });
-    selectedIdRef.current = null;
-    setSelectedId(null);
-    await refresh();
+    await runAction("clear-requests", "Clearing requests", "Request log cleared", async () => {
+      await adminFetch("/_mock/api/requests", { method: "DELETE" });
+      selectedIdRef.current = null;
+      setSelectedId(null);
+      setRequests([]);
+      void refresh({ silent: true });
+    });
   }
 
   async function createRule() {
-    const response = await fetch("/_mock/api/rules", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: "New fixed response",
-        provider: "openai",
+    await runAction("create-rule", "Creating rule", "Rule created", async () => {
+      const response = await adminFetch("/_mock/api/rules", {
         method: "POST",
-        pathPattern: "/v1/chat/completions",
-        priority: 10,
-        enabled: true,
-        matchers: [],
-        responseMode: "json",
-        status: 200,
-        responseHeaders: {},
-        responseBody: {
-          id: "chatcmpl_custom",
-          object: "chat.completion",
-          choices: [{ index: 0, message: { role: "assistant", content: "Custom mock response" }, finish_reason: "stop" }]
-        }
-      })
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "New fixed response",
+          provider: "openai",
+          method: "POST",
+          pathPattern: "/v1/chat/completions",
+          priority: 10,
+          enabled: true,
+          matchers: [],
+          responseMode: "json",
+          status: 200,
+          responseHeaders: {},
+          responseBody: {
+            id: "chatcmpl_custom",
+            object: "chat.completion",
+            choices: [{ index: 0, message: { role: "assistant", content: "Custom mock response" }, finish_reason: "stop" }]
+          },
+          sseEvents: [],
+          delayMs: 0
+        })
+      });
+      const created = await response.json();
+      pendingRuleUpsertsRef.current.add(created.id);
+      pendingRuleDeletesRef.current.delete(created.id);
+      setRules((current) => upsertRuleImmediately(current, created));
+      setSelectedRuleId(created.id);
+      setTab("rules");
+      void refresh({ silent: true });
     });
-    const created = await response.json();
-    setRules((current) => upsertRuleImmediately(current, created));
-    setSelectedRuleId(created.id);
-    setTab("rules");
-    void refresh();
   }
 
   async function saveRule(rule: MockRule) {
-    const response = await fetch(`/_mock/api/rules/${rule.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(rule)
+    await runAction(`save-rule-${rule.id}`, "Saving rule", "Rule saved", async () => {
+      const response = await adminFetch(`/_mock/api/rules/${rule.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(rule)
+      });
+      const saved = await response.json();
+      pendingRuleUpsertsRef.current.add(saved.id);
+      pendingRuleDeletesRef.current.delete(saved.id);
+      setRules((current) => upsertRuleImmediately(current, saved));
+      setSelectedRuleId(saved.id);
+      void refresh({ silent: true });
     });
-    if (!response.ok) throw new Error(await response.text());
-    const saved = await response.json();
-    setRules((current) => upsertRuleImmediately(current, saved));
-    setSelectedRuleId(saved.id);
-    void refresh();
   }
 
   async function deleteRule(id: number) {
-    const response = await fetch(`/_mock/api/rules/${id}`, { method: "DELETE" });
-    if (!response.ok) throw new Error(await response.text());
-    let nextSelectedRuleId: number | null = selectedRuleId;
-    setRules((current) => {
-      const next = removeRuleImmediately(current, id, nextSelectedRuleId);
-      nextSelectedRuleId = next.selectedRuleId;
-      return next.rules;
+    await runAction(`delete-rule-${id}`, "Deleting rule", "Rule deleted", async () => {
+      await adminFetch(`/_mock/api/rules/${id}`, { method: "DELETE" });
+      pendingRuleDeletesRef.current.add(id);
+      pendingRuleUpsertsRef.current.delete(id);
+      let nextSelectedRuleId: number | null = selectedRuleId;
+      setRules((current) => {
+        const next = removeRuleImmediately(current, id, nextSelectedRuleId);
+        nextSelectedRuleId = next.selectedRuleId;
+        return next.rules;
+      });
+      setSelectedRuleId(nextSelectedRuleId);
+      void refresh({ silent: true });
     });
-    setSelectedRuleId(nextSelectedRuleId);
-    void refresh();
+  }
+
+  async function runAction(action: string, busyMessage: string, successMessage: string, fn: () => Promise<void>) {
+    setBusyAction(action);
+    setStatus({ kind: "busy", message: busyMessage });
+    try {
+      await fn();
+      setStatus({ kind: "success", message: successMessage });
+    } catch (error) {
+      setStatus({ kind: "error", message: error instanceof Error ? error.message : "Action failed" });
+    } finally {
+      setBusyAction((current) => (current === action ? null : current));
+    }
   }
 
   function selectRequest(id: number) {
@@ -179,6 +237,8 @@ function App() {
             onSelect={selectRequest}
             onRefresh={refresh}
             onClear={clearRequests}
+            status={status}
+            busyAction={busyAction}
           />
         )}
         {tab === "rules" && (
@@ -189,13 +249,21 @@ function App() {
             onCreate={createRule}
             onSave={saveRule}
             onDelete={deleteRule}
+            status={status}
+            busyAction={busyAction}
           />
         )}
         {tab === "providers" && <ProvidersView />}
-        {tab === "settings" && <SettingsView onClear={clearRequests} requests={requests} />}
+        {tab === "settings" && <SettingsView onClear={clearRequests} requests={requests} status={status} busyAction={busyAction} />}
       </main>
     </div>
   );
+}
+
+async function adminFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const response = await fetch(input, { ...init, cache: "no-store" });
+  if (!response.ok) throw new Error(await response.text());
+  return response;
 }
 
 function TabButton(props: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
@@ -214,8 +282,10 @@ function RequestsView(props: {
   query: string;
   setQuery: (value: string) => void;
   onSelect: (id: number) => void;
-  onRefresh: () => void;
-  onClear: () => void;
+  onRefresh: () => Promise<void>;
+  onClear: () => Promise<void>;
+  status: ActionStatus;
+  busyAction: string | null;
 }) {
   return (
     <section className="surface">
@@ -225,12 +295,17 @@ function RequestsView(props: {
           <p>Inspect provider calls exactly as your client sent them.</p>
         </div>
         <div className="actions">
+          <StatusPill status={props.status} />
           <label className="search">
             <ListFilter size={16} />
             <input value={props.query} onChange={(event) => props.setQuery(event.target.value)} placeholder="Filter requests" />
           </label>
-          <button onClick={props.onRefresh}><RefreshCcw size={16} />Refresh</button>
-          <button className="danger" onClick={props.onClear}><Trash2 size={16} />Clear</button>
+          <button disabled={props.busyAction === "refresh"} onClick={() => void props.onRefresh()}>
+            <RefreshCcw size={16} />{props.busyAction === "refresh" ? "Refreshing" : "Refresh"}
+          </button>
+          <button className="danger" disabled={props.busyAction === "clear-requests"} onClick={() => void props.onClear()}>
+            <Trash2 size={16} />{props.busyAction === "clear-requests" ? "Clearing" : "Clear"}
+          </button>
         </div>
       </header>
       <div className="request-grid">
@@ -283,7 +358,9 @@ function RulesView({
   onSelect,
   onCreate,
   onSave,
-  onDelete
+  onDelete,
+  status,
+  busyAction
 }: {
   rules: MockRule[];
   selectedId: number | null;
@@ -291,6 +368,8 @@ function RulesView({
   onCreate: () => void;
   onSave: (rule: MockRule) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  status: ActionStatus;
+  busyAction: string | null;
 }) {
   const selected = rules.find((rule) => rule.id === selectedId) ?? rules[0];
   return (
@@ -300,7 +379,12 @@ function RulesView({
           <h1>Rules</h1>
           <p>Rules decide what fixed response a matching client request receives. Higher priority wins.</p>
         </div>
-        <button onClick={onCreate}><Plus size={16} />New rule</button>
+        <div className="actions">
+          <StatusPill status={status} />
+          <button disabled={busyAction === "create-rule"} onClick={() => void onCreate()}>
+            <Plus size={16} />{busyAction === "create-rule" ? "Creating" : "New rule"}
+          </button>
+        </div>
       </header>
       <div className="rules-grid">
         <div className="rule-list">
@@ -317,13 +401,23 @@ function RulesView({
             </button>
           ))}
         </div>
-        <RuleEditor rule={selected} onSave={onSave} onDelete={onDelete} />
+        <RuleEditor rule={selected} onSave={onSave} onDelete={onDelete} busyAction={busyAction} />
       </div>
     </section>
   );
 }
 
-function RuleEditor({ rule, onSave, onDelete }: { rule?: MockRule; onSave: (rule: MockRule) => Promise<void>; onDelete: (id: number) => Promise<void> }) {
+function RuleEditor({
+  rule,
+  onSave,
+  onDelete,
+  busyAction
+}: {
+  rule?: MockRule;
+  onSave: (rule: MockRule) => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
+  busyAction: string | null;
+}) {
   const [draft, setDraft] = useState<MockRule | undefined>(rule);
   const [matchersText, setMatchersText] = useState("[]");
   const [headersText, setHeadersText] = useState("{}");
@@ -341,6 +435,8 @@ function RuleEditor({ rule, onSave, onDelete }: { rule?: MockRule; onSave: (rule
   }, [rule?.id]);
 
   if (!draft) return <aside className="rule-editor empty">Create or select a rule.</aside>;
+  const saving = busyAction === `save-rule-${draft.id}`;
+  const deleting = busyAction === `delete-rule-${draft.id}`;
 
   function update(patch: Partial<MockRule>) {
     setDraft((current) => (current ? { ...current, ...patch } : current));
@@ -414,8 +510,8 @@ function RuleEditor({ rule, onSave, onDelete }: { rule?: MockRule; onSave: (rule
         <textarea value={eventsText} onChange={(event) => setEventsText(event.target.value)} />
       </label>
       <div className="actions">
-        <button onClick={save}><Save size={16} />Save</button>
-        <button className="danger" onClick={remove}><Trash2 size={16} />Delete</button>
+        <button disabled={saving || deleting} onClick={save}><Save size={16} />{saving ? "Saving" : "Save"}</button>
+        <button className="danger" disabled={saving || deleting} onClick={remove}><Trash2 size={16} />{deleting ? "Deleting" : "Delete"}</button>
       </div>
     </aside>
   );
@@ -450,7 +546,17 @@ function ProvidersView() {
   );
 }
 
-function SettingsView({ onClear, requests }: { onClear: () => void; requests: CapturedRequest[] }) {
+function SettingsView({
+  onClear,
+  requests,
+  status,
+  busyAction
+}: {
+  onClear: () => Promise<void>;
+  requests: CapturedRequest[];
+  status: ActionStatus;
+  busyAction: string | null;
+}) {
   function exportJson() {
     const blob = new Blob([JSON.stringify(requests, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -469,8 +575,11 @@ function SettingsView({ onClear, requests }: { onClear: () => void; requests: Ca
         </div>
       </header>
       <div className="settings-grid">
+        <StatusPill status={status} />
         <button onClick={exportJson}><FileDown size={16} />Export requests</button>
-        <button className="danger" onClick={onClear}><Trash2 size={16} />Clear request log</button>
+        <button className="danger" disabled={busyAction === "clear-requests"} onClick={() => void onClear()}>
+          <Trash2 size={16} />{busyAction === "clear-requests" ? "Clearing" : "Clear request log"}
+        </button>
       </div>
       <pre>{`PORT=7394
 HOST=127.0.0.1
@@ -478,6 +587,11 @@ DATABASE_PATH=./data/mocklab.sqlite
 MAX_BODY_BYTES=52428800`}</pre>
     </section>
   );
+}
+
+function StatusPill({ status }: { status: ActionStatus }) {
+  if (status.kind === "idle" || !status.message) return null;
+  return <span className={`status-pill ${status.kind}`}>{status.message}</span>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

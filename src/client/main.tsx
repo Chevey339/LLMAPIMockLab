@@ -1,6 +1,7 @@
 import { Activity, Braces, Check, Copy, Database, FileDown, ListFilter, Play, Plus, RefreshCcw, Save, Settings, Trash2, Workflow } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { removeRuleImmediately, upsertRuleImmediately } from "./ruleState.js";
 import "./styles.css";
 
 type Tab = "requests" | "rules" | "providers" | "settings";
@@ -108,9 +109,10 @@ function App() {
       })
     });
     const created = await response.json();
-    await refresh();
+    setRules((current) => upsertRuleImmediately(current, created));
     setSelectedRuleId(created.id);
     setTab("rules");
+    void refresh();
   }
 
   async function saveRule(rule: MockRule) {
@@ -120,13 +122,23 @@ function App() {
       body: JSON.stringify(rule)
     });
     if (!response.ok) throw new Error(await response.text());
-    await refresh();
+    const saved = await response.json();
+    setRules((current) => upsertRuleImmediately(current, saved));
+    setSelectedRuleId(saved.id);
+    void refresh();
   }
 
   async function deleteRule(id: number) {
-    await fetch(`/_mock/api/rules/${id}`, { method: "DELETE" });
-    setSelectedRuleId((current) => (current === id ? null : current));
-    await refresh();
+    const response = await fetch(`/_mock/api/rules/${id}`, { method: "DELETE" });
+    if (!response.ok) throw new Error(await response.text());
+    let nextSelectedRuleId: number | null = selectedRuleId;
+    setRules((current) => {
+      const next = removeRuleImmediately(current, id, nextSelectedRuleId);
+      nextSelectedRuleId = next.selectedRuleId;
+      return next.rules;
+    });
+    setSelectedRuleId(nextSelectedRuleId);
+    void refresh();
   }
 
   function selectRequest(id: number) {
@@ -379,6 +391,7 @@ function RuleEditor({ rule, onSave, onDelete }: { rule?: MockRule; onSave: (rule
         <label>Path pattern<input value={draft.pathPattern} onChange={(event) => update({ pathPattern: event.target.value })} /></label>
         <label>Priority<input type="number" value={draft.priority} onChange={(event) => update({ priority: Number(event.target.value) })} /></label>
         <label>Status<input type="number" value={draft.status} onChange={(event) => update({ status: Number(event.target.value) })} /></label>
+        <label>Stream delay ms<input type="number" min="0" value={draft.delayMs} onChange={(event) => update({ delayMs: Number(event.target.value) })} /></label>
         <label>Mode
           <select value={draft.responseMode} onChange={(event) => update({ responseMode: event.target.value as MockRule["responseMode"] })}>
             <option value="json">json</option>

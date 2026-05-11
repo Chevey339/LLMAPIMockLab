@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import Fastify from "fastify";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { AppDatabase } from "./db.js";
 import { createDatabase } from "./db.js";
@@ -104,7 +105,8 @@ function registerProviderRoutes(app: FastifyInstance, db: AppDatabase): void {
       ...(rule?.responseHeaders ?? {})
     };
     const hasStaticBody = rule && rule.responseBody !== null && rule.responseBody !== undefined;
-    const body = stream ? buildSse(rule?.sseEvents?.length ? rule.sseEvents : defaultSseEvents(ctx)) : JSON.stringify(hasStaticBody ? rule.responseBody : defaultJsonResponse(ctx));
+    const sseEvents = stream ? (rule?.sseEvents?.length ? rule.sseEvents : defaultSseEvents(ctx)) : [];
+    const body = stream ? buildSse(sseEvents) : JSON.stringify(hasStaticBody ? rule.responseBody : defaultJsonResponse(ctx));
 
     Object.entries(responseHeaders).forEach(([key, value]) => reply.header(key, value));
     reply.status(status);
@@ -124,6 +126,9 @@ function registerProviderRoutes(app: FastifyInstance, db: AppDatabase): void {
       responseBody: body,
       durationMs: Date.now() - started
     });
+    if (stream) {
+      return reply.send(streamSse(sseEvents, rule?.delayMs ?? 0));
+    }
     return reply.send(body);
   };
   for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"] as const) {
@@ -164,6 +169,24 @@ function parseJson(raw: string): unknown {
 
 function buildSse(events: string[]): string {
   return events.map((event) => event.trimEnd()).join("\n\n") + "\n\n";
+}
+
+function streamSse(events: string[], delayMs: number): Readable {
+  const queue = events.map((event) => `${event.trimEnd()}\n\n`);
+  return Readable.from(
+    (async function* () {
+      for (const [index, event] of queue.entries()) {
+        if (index > 0 && delayMs > 0) {
+          await sleep(delayMs);
+        }
+        yield event;
+      }
+    })()
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeRule(body: unknown): NewRule {

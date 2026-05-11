@@ -235,4 +235,76 @@ describe("streaming", () => {
     const logs = (await app.inject({ method: "GET", url: "/_mock/api/requests" })).json();
     expect(logs.items[0].responseBody).toContain("[DONE]");
   });
+
+  it("uses OpenAI-compatible reasoning and answer deltas for fallback chat streams", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "deepseek-v4-flash", stream: true, messages: [{ role: "user", content: "my" }] }
+    });
+
+    const events = parseSseData(response.body);
+    const chunks = events.filter((event) => event !== "[DONE]").map((event) => JSON.parse(event));
+    const deltas = chunks.map((chunk) => chunk.choices[0].delta);
+
+    expect(events.at(-1)).toBe("[DONE]");
+    expect(deltas[0]).toMatchObject({ role: "assistant", content: null, reasoning_content: "" });
+    expect(deltas.some((delta) => delta.content === null && delta.reasoning_content === "The")).toBe(true);
+    expect(deltas.some((delta) => delta.content === "Hello" && delta.reasoning_content === null)).toBe(true);
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("stop");
+    expect(chunks.at(-1).usage.completion_tokens_details.reasoning_tokens).toBeGreaterThan(0);
+  });
+
+  it("streams configured SSE rule events over HTTP with per-event delay", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/_mock/api/rules",
+      payload: {
+        name: "delayed sse",
+        provider: "openai",
+        method: "POST",
+        pathPattern: "/v1/chat/completions",
+        priority: 100,
+        enabled: true,
+        responseMode: "sse",
+        status: 200,
+        responseHeaders: {},
+        responseBody: null,
+        sseEvents: ["data: first", "data: second"],
+        delayMs: 100
+      }
+    });
+
+    const baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
+    const started = performance.now();
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", stream: true, messages: [{ role: "user", content: "stream" }] })
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.body).not.toBeNull();
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    const first = await reader.read();
+    const firstAt = performance.now() - started;
+    const second = await reader.read();
+    const secondAt = performance.now() - started;
+    await reader.cancel();
+
+    expect(decoder.decode(first.value)).toContain("data: first");
+    expect(decoder.decode(first.value)).not.toContain("data: second");
+    expect(decoder.decode(second.value)).toContain("data: second");
+    expect(secondAt - firstAt).toBeGreaterThanOrEqual(70);
+  });
 });
+
+function parseSseData(body: string): string[] {
+  return body
+    .split("\n\n")
+    .map((event) => event.split("\n").find((line) => line.startsWith("data: "))?.slice("data: ".length))
+    .filter((event): event is string => Boolean(event));
+}

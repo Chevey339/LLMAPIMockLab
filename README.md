@@ -135,7 +135,7 @@ Response body example for OpenAI Chat Completions:
 }
 ```
 
-For streaming rules, set mode to `sse` and provide an array of SSE event strings.
+For streaming rules, set mode to `sse` and provide an array of SSE event strings. Each item is sent as its own SSE event with a blank line terminator. Set `delayMs` to add a delay between streamed events, which is useful for testing clients that render incremental `reasoning_content` and `content` deltas.
 
 ## Development
 

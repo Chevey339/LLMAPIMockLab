@@ -29,12 +29,7 @@ export function defaultSseEvents(ctx: RequestContext): string[] {
       "data: [DONE]"
     ];
   }
-  return [
-    `data: ${JSON.stringify({ id: "chatcmpl_mock", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] })}`,
-    `data: ${JSON.stringify({ id: "chatcmpl_mock", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "Mock response" }, finish_reason: null }] })}`,
-    `data: ${JSON.stringify({ id: "chatcmpl_mock", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}`,
-    "data: [DONE]"
-  ];
+  return openaiChatCompletionStream(ctx);
 }
 
 export function wantsStream(ctx: RequestContext): boolean {
@@ -129,4 +124,87 @@ function openaiModels(): unknown {
       { id: "mock-gemini", object: "model", created: 0, owned_by: "mocklab" }
     ]
   };
+}
+
+function openaiChatCompletionStream(ctx: RequestContext): string[] {
+  const id = "chatcmpl_mock";
+  const created = Math.floor(Date.now() / 1000);
+  const model = modelFromJson(ctx);
+  const reasoningTokens = [
+    "The",
+    " user",
+    " just",
+    " said",
+    " \"",
+    promptPreview(ctx),
+    "\"",
+    " -",
+    " this",
+    " is",
+    " a",
+    " mock",
+    " reasoning",
+    " trace",
+    "."
+  ];
+  const answerTokens = [
+    "Hello",
+    "!",
+    " It",
+    " looks",
+    " like",
+    " your",
+    " streaming",
+    " mock",
+    " is",
+    " working",
+    "."
+  ];
+  const usage = {
+    prompt_tokens: 12,
+    completion_tokens: answerTokens.length,
+    total_tokens: 12 + answerTokens.length,
+    prompt_tokens_details: { cached_tokens: 0 },
+    completion_tokens_details: { reasoning_tokens: reasoningTokens.length },
+    prompt_cache_hit_tokens: 0,
+    prompt_cache_miss_tokens: 12
+  };
+
+  return [
+    openaiChunk({ id, created, model, delta: { role: "assistant", content: null, reasoning_content: "" }, finishReason: null }),
+    ...reasoningTokens.map((token) => openaiChunk({ id, created, model, delta: { content: null, reasoning_content: token }, finishReason: null })),
+    ...answerTokens.map((token) => openaiChunk({ id, created, model, delta: { content: token, reasoning_content: null }, finishReason: null })),
+    openaiChunk({ id, created, model, delta: { content: "", reasoning_content: null }, finishReason: "stop", usage }),
+    "data: [DONE]"
+  ];
+}
+
+function openaiChunk(input: {
+  id: string;
+  created: number;
+  model: string;
+  delta: Record<string, unknown>;
+  finishReason: string | null;
+  usage?: unknown;
+}): string {
+  return `data: ${JSON.stringify({
+    id: input.id,
+    object: "chat.completion.chunk",
+    created: input.created,
+    model: input.model,
+    system_fingerprint: "fp_mocklab",
+    choices: [{ index: 0, delta: input.delta, logprobs: null, finish_reason: input.finishReason }],
+    usage: input.usage ?? null
+  })}`;
+}
+
+function promptPreview(ctx: RequestContext): string {
+  const json = ctx.json;
+  if (!json || typeof json !== "object") return "message";
+  const messages = (json as Record<string, unknown>).messages;
+  if (!Array.isArray(messages)) return "message";
+  const last = [...messages].reverse().find((message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "user");
+  const content = last && typeof last === "object" ? (last as Record<string, unknown>).content : null;
+  if (typeof content === "string" && content.trim()) return content.trim().slice(0, 40);
+  return "message";
 }

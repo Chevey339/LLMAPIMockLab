@@ -2,6 +2,7 @@ import { Activity, Braces, Check, Copy, Database, FileDown, ListFilter, Play, Pl
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { mergeRulesPreservingPending, removeRuleImmediately, settlePendingRuleIds, upsertRuleImmediately } from "./ruleState.js";
+import { formatSseEventsInput, parseSseEventsInput } from "./sseEvents.js";
 import "./styles.css";
 
 type Tab = "requests" | "rules" | "providers" | "settings";
@@ -430,7 +431,7 @@ function RuleEditor({
     setMatchersText(JSON.stringify(rule?.matchers ?? [], null, 2));
     setHeadersText(JSON.stringify(rule?.responseHeaders ?? {}, null, 2));
     setBodyText(JSON.stringify(rule?.responseBody ?? null, null, 2));
-    setEventsText(JSON.stringify(rule?.sseEvents ?? [], null, 2));
+    setEventsText(formatSseEventsInput(rule?.sseEvents ?? []));
     setMessage("");
   }, [rule?.id]);
 
@@ -450,12 +451,12 @@ function RuleEditor({
         matchers: JSON.parse(matchersText),
         responseHeaders: JSON.parse(headersText),
         responseBody: JSON.parse(bodyText),
-        sseEvents: JSON.parse(eventsText)
+        sseEvents: parseSseEventsInput(eventsText)
       };
       await onSave(next);
       setMessage("Saved");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Invalid JSON");
+      setMessage(error instanceof Error ? error.message : "Invalid rule input");
     }
   }
 
@@ -506,9 +507,10 @@ function RuleEditor({
       <label className="textarea-label">Response body JSON
         <textarea value={bodyText} onChange={(event) => setBodyText(event.target.value)} />
       </label>
-      <label className="textarea-label">SSE events JSON array
+      <label className="textarea-label">SSE events
         <textarea value={eventsText} onChange={(event) => setEventsText(event.target.value)} />
       </label>
+      <p className="hint">Paste raw SSE blocks like data: {"{"}...{"}"} separated by blank lines, ending with data: [DONE]. JSON arrays are still accepted.</p>
       <div className="actions">
         <button disabled={saving || deleting} onClick={save}><Save size={16} />{saving ? "Saving" : "Save"}</button>
         <button className="danger" disabled={saving || deleting} onClick={remove}><Trash2 size={16} />{deleting ? "Deleting" : "Delete"}</button>

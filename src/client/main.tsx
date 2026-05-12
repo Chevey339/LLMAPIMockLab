@@ -1,8 +1,9 @@
-import { Activity, Braces, Check, Copy, Database, FileDown, ListFilter, Play, Plus, RefreshCcw, Save, Settings, Trash2, Workflow } from "lucide-react";
+import { Activity, Braces, Check, Copy, Database, FileDown, ListFilter, Moon, Play, Plus, RefreshCcw, Save, Settings, Sun, Trash2, Workflow } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { mergeRulesPreservingPending, removeRuleImmediately, settlePendingRuleIds, upsertRuleImmediately } from "./ruleState.js";
 import { formatSseEventsInput, parseSseEventsInput } from "./sseEvents.js";
+import { nextTheme, resolveInitialTheme, type ThemePreference } from "./theme.js";
 import "./styles.css";
 
 type Tab = "requests" | "rules" | "providers" | "settings";
@@ -57,8 +58,15 @@ type ActionStatus = {
 };
 
 const idleStatus: ActionStatus = { kind: "idle", message: "" };
+const themeStorageKey = "mocklab-theme";
 
 function App() {
+  const [theme, setTheme] = useState<ThemePreference>(() =>
+    resolveInitialTheme(
+      window.localStorage.getItem(themeStorageKey),
+      window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false
+    )
+  );
   const [tab, setTab] = useState<Tab>("requests");
   const [requests, setRequests] = useState<CapturedRequestSummary[]>([]);
   const [requestDetails, setRequestDetails] = useState<Record<number, CapturedRequest>>({});
@@ -80,6 +88,12 @@ function App() {
     if (!needle) return requests;
     return requests.filter((item) => `${item.provider} ${item.method} ${item.path} ${item.responseStatus}`.toLowerCase().includes(needle));
   }, [requests, query]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem(themeStorageKey, theme);
+  }, [theme]);
 
   async function refresh(options: { silent?: boolean } = {}) {
     await Promise.all([refreshRequests(options), refreshRules(options)]);
@@ -272,6 +286,15 @@ function App() {
           <TabButton active={tab === "providers"} onClick={() => setTab("providers")} icon={<Play size={18} />} label="Providers" />
           <TabButton active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={18} />} label="Settings" />
         </nav>
+        <button
+          className="theme-toggle"
+          type="button"
+          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+          onClick={() => setTheme((current) => nextTheme(current))}
+        >
+          {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+        </button>
         <div className="side-note">
           <Database size={16} />
           Headers and bodies are stored raw.

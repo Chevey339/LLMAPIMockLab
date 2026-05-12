@@ -24,6 +24,16 @@ type CapturedRequest = {
   durationMs: number;
 };
 
+type CapturedRequestSummary = Pick<
+  CapturedRequest,
+  "id" | "timestamp" | "provider" | "method" | "path" | "matchedRuleId" | "responseStatus" | "durationMs"
+> & {
+  rawBodyBytes: number;
+  responseBodyBytes: number;
+};
+
+type RequestListItem = CapturedRequestSummary | CapturedRequest;
+
 type MockRule = {
   id: number;
   name: string;
@@ -50,7 +60,8 @@ const idleStatus: ActionStatus = { kind: "idle", message: "" };
 
 function App() {
   const [tab, setTab] = useState<Tab>("requests");
-  const [requests, setRequests] = useState<CapturedRequest[]>([]);
+  const [requests, setRequests] = useState<CapturedRequestSummary[]>([]);
+  const [requestDetails, setRequestDetails] = useState<Record<number, CapturedRequest>>({});
   const [rules, setRules] = useState<MockRule[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const selectedIdRef = useRef<number | null>(null);
@@ -62,53 +73,81 @@ function App() {
   const pendingRuleDeletesRef = useRef(new Set<number>());
   const refreshSeqRef = useRef(0);
 
-  const selected = useMemo(() => requests.find((item) => item.id === selectedId) ?? requests[0], [requests, selectedId]);
+  const selectedSummary = useMemo(() => requests.find((item) => item.id === selectedId) ?? requests[0], [requests, selectedId]);
+  const selected = selectedSummary ? (requestDetails[selectedSummary.id] ?? selectedSummary) : undefined;
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return requests;
-    return requests.filter((item) => `${item.provider} ${item.method} ${item.path} ${item.rawBody} ${item.responseBody}`.toLowerCase().includes(needle));
+    return requests.filter((item) => `${item.provider} ${item.method} ${item.path} ${item.responseStatus}`.toLowerCase().includes(needle));
   }, [requests, query]);
 
   async function refresh(options: { silent?: boolean } = {}) {
+    await Promise.all([refreshRequests(options), refreshRules(options)]);
+  }
+
+  async function refreshRequests(options: { silent?: boolean } = {}) {
     const seq = ++refreshSeqRef.current;
     if (!options.silent) setBusyAction("refresh");
     try {
-      const [requestData, ruleData] = await Promise.all([
-        adminFetch("/_mock/api/requests").then((res) => res.json()),
-        adminFetch("/_mock/api/rules").then((res) => res.json())
-      ]);
+      const requestData = await adminFetch("/_mock/api/requests?limit=100").then((res) => res.json());
       if (seq !== refreshSeqRef.current) return;
-      const settled = settlePendingRuleIds(ruleData.items, pendingRuleUpsertsRef.current, pendingRuleDeletesRef.current);
-      pendingRuleUpsertsRef.current = settled.pendingUpsertIds;
-      pendingRuleDeletesRef.current = settled.pendingDeletedIds;
       setRequests(requestData.items);
-      setRules((current) =>
-        mergeRulesPreservingPending(current, ruleData.items, pendingRuleUpsertsRef.current, pendingRuleDeletesRef.current)
+      setRequestDetails((current) =>
+        Object.fromEntries(Object.entries(current).filter(([id]) => requestData.items.some((item: CapturedRequestSummary) => item.id === Number(id))))
       );
       const current = selectedIdRef.current;
-      if (current && requestData.items.some((item: CapturedRequest) => item.id === current)) {
+      if (current && requestData.items.some((item: CapturedRequestSummary) => item.id === current)) {
         if (!options.silent) setStatus({ kind: "success", message: "Refreshed" });
         return;
       }
-      if (!current && requestData.items[0]) {
+      if (requestData.items[0]) {
         selectedIdRef.current = requestData.items[0].id;
         setSelectedId(requestData.items[0].id);
+      } else {
+        selectedIdRef.current = null;
+        setSelectedId(null);
       }
       if (!options.silent) setStatus({ kind: "success", message: "Refreshed" });
     } catch (error) {
       if (!options.silent) {
-        setStatus({ kind: "error", message: error instanceof Error ? error.message : "Refresh failed" });
+        setStatus({ kind: "error", message: error instanceof Error ? error.message : "Request refresh failed" });
       }
     } finally {
       if (!options.silent) setBusyAction((current) => (current === "refresh" ? null : current));
     }
   }
 
+  async function refreshRules(options: { silent?: boolean } = {}) {
+    try {
+      const ruleData = await adminFetch("/_mock/api/rules").then((res) => res.json());
+      const settled = settlePendingRuleIds(ruleData.items, pendingRuleUpsertsRef.current, pendingRuleDeletesRef.current);
+      pendingRuleUpsertsRef.current = settled.pendingUpsertIds;
+      pendingRuleDeletesRef.current = settled.pendingDeletedIds;
+      setRules((current) =>
+        mergeRulesPreservingPending(current, ruleData.items, pendingRuleUpsertsRef.current, pendingRuleDeletesRef.current)
+      );
+    } catch (error) {
+      if (!options.silent) {
+        setStatus({ kind: "error", message: error instanceof Error ? error.message : "Rules refresh failed" });
+      }
+    }
+  }
+
   useEffect(() => {
-    void refresh({ silent: true });
-    const timer = window.setInterval(() => void refresh({ silent: true }), 2500);
+    void refreshRequests({ silent: true });
+    void refreshRules({ silent: true });
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      if (tab === "requests") void refreshRequests({ silent: true });
+      if (tab === "rules") void refreshRules({ silent: true });
+    }, 5000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [tab]);
+
+  useEffect(() => {
+    if (!selectedSummary || requestDetails[selectedSummary.id]) return;
+    void loadRequestDetail(selectedSummary.id);
+  }, [selectedSummary?.id]);
 
   async function clearRequests() {
     await runAction("clear-requests", "Clearing requests", "Request log cleared", async () => {
@@ -116,7 +155,8 @@ function App() {
       selectedIdRef.current = null;
       setSelectedId(null);
       setRequests([]);
-      void refresh({ silent: true });
+      setRequestDetails({});
+      void refreshRequests({ silent: true });
     });
   }
 
@@ -151,7 +191,7 @@ function App() {
       setRules((current) => upsertRuleImmediately(current, created));
       setSelectedRuleId(created.id);
       setTab("rules");
-      void refresh({ silent: true });
+      void refreshRules({ silent: true });
     });
   }
 
@@ -167,7 +207,7 @@ function App() {
       pendingRuleDeletesRef.current.delete(saved.id);
       setRules((current) => upsertRuleImmediately(current, saved));
       setSelectedRuleId(saved.id);
-      void refresh({ silent: true });
+      void refreshRules({ silent: true });
     });
   }
 
@@ -183,7 +223,7 @@ function App() {
         return next.rules;
       });
       setSelectedRuleId(nextSelectedRuleId);
-      void refresh({ silent: true });
+      void refreshRules({ silent: true });
     });
   }
 
@@ -203,6 +243,17 @@ function App() {
   function selectRequest(id: number) {
     selectedIdRef.current = id;
     setSelectedId(id);
+    void loadRequestDetail(id);
+  }
+
+  async function loadRequestDetail(id: number) {
+    if (requestDetails[id]) return;
+    try {
+      const detail = await adminFetch(`/_mock/api/requests/${id}`).then((res) => res.json());
+      setRequestDetails((current) => ({ ...current, [id]: detail }));
+    } catch (error) {
+      setStatus({ kind: "error", message: error instanceof Error ? error.message : "Request detail failed" });
+    }
   }
 
   return (
@@ -236,7 +287,7 @@ function App() {
             query={query}
             setQuery={setQuery}
             onSelect={selectRequest}
-            onRefresh={refresh}
+            onRefresh={refreshRequests}
             onClear={clearRequests}
             status={status}
             busyAction={busyAction}
@@ -277,8 +328,8 @@ function TabButton(props: { active: boolean; onClick: () => void; icon: React.Re
 }
 
 function RequestsView(props: {
-  requests: CapturedRequest[];
-  selected?: CapturedRequest;
+  requests: CapturedRequestSummary[];
+  selected?: RequestListItem;
   selectedId: number | null;
   query: string;
   setQuery: (value: string) => void;
@@ -330,10 +381,17 @@ function RequestsView(props: {
   );
 }
 
-function RequestDetail({ request }: { request?: CapturedRequest }) {
+function RequestDetail({ request }: { request?: RequestListItem }) {
   const [panel, setPanel] = useState<"headers" | "body" | "response">("body");
   if (!request) return <div className="detail empty">Select a request to inspect it.</div>;
-  const panelText = panel === "headers" ? JSON.stringify(request.headers, null, 2) : panel === "body" ? request.rawBody : request.responseBody;
+  const hasDetail = "rawBody" in request;
+  const panelText = hasDetail
+    ? panel === "headers"
+      ? JSON.stringify(request.headers, null, 2)
+      : panel === "body"
+        ? request.rawBody
+        : request.responseBody
+    : "Loading request details...";
   return (
     <aside className="detail">
       <div className="detail-head">
@@ -555,7 +613,7 @@ function SettingsView({
   busyAction
 }: {
   onClear: () => Promise<void>;
-  requests: CapturedRequest[];
+  requests: CapturedRequestSummary[];
   status: ActionStatus;
   busyAction: string | null;
 }) {

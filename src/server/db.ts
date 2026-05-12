@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import type { CapturedRequest, MockRule, NewRule } from "./types.js";
+import type { CapturedRequest, CapturedRequestSummary, MockRule, NewRule } from "./types.js";
 
 export type AppDatabase = {
   sqlite: DatabaseSync;
@@ -12,7 +12,7 @@ export type AppDatabase = {
   listRules(): MockRule[];
   getRule(id: number): MockRule | null;
   insertRequest(input: Omit<CapturedRequest, "id">): CapturedRequest;
-  listRequests(limit?: number): CapturedRequest[];
+  listRequests(limit?: number): CapturedRequestSummary[];
   getRequest(id: number): CapturedRequest | null;
   clearRequests(): void;
   close(): void;
@@ -199,9 +199,17 @@ function wrapDatabase(sqlite: DatabaseSync): AppDatabase {
     },
     listRequests(limit = 200) {
       return sqlite
-        .prepare("SELECT * FROM requests ORDER BY id DESC LIMIT ?")
+        .prepare(`
+          SELECT
+            id, timestamp, provider, method, path, matched_rule_id, response_status, duration_ms,
+            length(raw_body) AS raw_body_bytes,
+            length(response_body) AS response_body_bytes
+          FROM requests
+          ORDER BY id DESC
+          LIMIT ?
+        `)
         .all(limit)
-        .map(requestFromRow);
+        .map(requestSummaryFromRow);
     },
     getRequest(id) {
       const row = sqlite.prepare("SELECT * FROM requests WHERE id = ?").get(id) as Row | undefined;
@@ -254,5 +262,20 @@ function requestFromRow(row: Row): CapturedRequest {
     responseHeaders: JSON.parse(String(row.response_headers)),
     responseBody: String(row.response_body),
     durationMs: Number(row.duration_ms)
+  };
+}
+
+function requestSummaryFromRow(row: Row): CapturedRequestSummary {
+  return {
+    id: Number(row.id),
+    timestamp: String(row.timestamp),
+    provider: row.provider as CapturedRequestSummary["provider"],
+    method: String(row.method),
+    path: String(row.path),
+    matchedRuleId: row.matched_rule_id === null ? null : Number(row.matched_rule_id),
+    responseStatus: Number(row.response_status),
+    durationMs: Number(row.duration_ms),
+    rawBodyBytes: Number(row.raw_body_bytes),
+    responseBodyBytes: Number(row.response_body_bytes)
   };
 }

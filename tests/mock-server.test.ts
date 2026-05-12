@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe("request capture", () => {
-  it("stores raw headers and raw body for provider requests", async () => {
+  it("keeps request list lightweight and returns full request details on demand", async () => {
     const body = JSON.stringify({
       model: "gpt-test",
       messages: [{ role: "user", content: "capture this" }]
@@ -40,10 +40,31 @@ describe("request capture", () => {
     const logs = await app.inject({ method: "GET", url: "/_mock/api/requests" });
     const parsed = logs.json();
     expect(parsed.items).toHaveLength(1);
-    expect(parsed.items[0].rawBody).toBe(body);
-    expect(parsed.items[0].headers.authorization).toBe("Bearer secret-token");
-    expect(parsed.items[0].headers["x-api-key"]).toBe("visible-key");
+    expect(parsed.items[0].rawBody).toBeUndefined();
+    expect(parsed.items[0].responseBody).toBeUndefined();
+    expect(parsed.items[0].headers).toBeUndefined();
+    expect(parsed.items[0].rawBodyBytes).toBe(Buffer.byteLength(body));
     expect(parsed.items[0].provider).toBe("openai");
+
+    const detail = await app.inject({ method: "GET", url: `/_mock/api/requests/${parsed.items[0].id}` });
+    expect(detail.json().rawBody).toBe(body);
+    expect(detail.json().headers.authorization).toBe("Bearer secret-token");
+    expect(detail.json().headers["x-api-key"]).toBe("visible-key");
+  });
+
+  it("does not return large captured bodies in the request list payload", async () => {
+    const largeContent = "x".repeat(250_000);
+    await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: { model: "gpt-test", messages: [{ role: "user", content: largeContent }] }
+    });
+
+    const list = await app.inject({ method: "GET", url: "/_mock/api/requests" });
+    const detail = await app.inject({ method: "GET", url: `/_mock/api/requests/${list.json().items[0].id}` });
+
+    expect(list.body.length).toBeLessThan(2_000);
+    expect(detail.body.length).toBeGreaterThan(250_000);
   });
 });
 
@@ -221,7 +242,8 @@ describe("provider compatibility", () => {
 
     expect(response.json().choices[0].message.tool_calls[0].function.name).toBe("get_weather");
     const logs = (await app.inject({ method: "GET", url: "/_mock/api/requests" })).json();
-    expect(logs.items[0].rawBody).toContain("data:image/png;base64,abc");
+    const detail = (await app.inject({ method: "GET", url: `/_mock/api/requests/${logs.items[0].id}` })).json();
+    expect(detail.rawBody).toContain("data:image/png;base64,abc");
   });
 });
 
@@ -239,7 +261,8 @@ describe("streaming", () => {
     expect(response.body).toContain("[DONE]");
 
     const logs = (await app.inject({ method: "GET", url: "/_mock/api/requests" })).json();
-    expect(logs.items[0].responseBody).toContain("[DONE]");
+    const detail = (await app.inject({ method: "GET", url: `/_mock/api/requests/${logs.items[0].id}` })).json();
+    expect(detail.responseBody).toContain("[DONE]");
   });
 
   it("uses OpenAI-compatible reasoning and answer deltas for fallback chat streams", async () => {

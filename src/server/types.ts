@@ -47,6 +47,14 @@ export type CapturedRequest = {
   durationMs: number;
 };
 
+export type CapturedRequestSummary = Pick<
+  CapturedRequest,
+  "id" | "timestamp" | "provider" | "method" | "path" | "matchedRuleId" | "responseStatus" | "durationMs"
+> & {
+  rawBodyBytes: number;
+  responseBodyBytes: number;
+};
+
 export type RequestContext = {
   provider: Provider;
   method: string;

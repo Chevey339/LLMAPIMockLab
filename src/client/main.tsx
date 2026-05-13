@@ -1,6 +1,7 @@
 import { Activity, Braces, Check, Copy, Database, FileDown, ListFilter, Moon, Play, Plus, RefreshCcw, Save, Settings, Sun, Trash2, Workflow } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { copyText } from "./clipboard.js";
 import { mergeRulesPreservingPending, removeRuleImmediately, settlePendingRuleIds, upsertRuleImmediately } from "./ruleState.js";
 import { formatSseEventsInput, parseSseEventsInput } from "./sseEvents.js";
 import { nextTheme, resolveInitialTheme, type ThemePreference } from "./theme.js";
@@ -406,6 +407,11 @@ function RequestsView(props: {
 
 function RequestDetail({ request }: { request?: RequestListItem }) {
   const [panel, setPanel] = useState<"headers" | "body" | "response">("body");
+  const [copyState, setCopyState] = useState<"idle" | "success" | "error">("idle");
+  useEffect(() => {
+    setCopyState("idle");
+  }, [request?.id, panel]);
+
   if (!request) return <div className="detail empty">Select a request to inspect it.</div>;
   const hasDetail = "rawBody" in request;
   const panelText = hasDetail
@@ -415,6 +421,18 @@ function RequestDetail({ request }: { request?: RequestListItem }) {
         ? request.rawBody
         : request.responseBody
     : "Loading request details...";
+
+  async function handleCopy() {
+    if (!hasDetail) return;
+    try {
+      await copyText(panelText);
+      setCopyState("success");
+      window.setTimeout(() => setCopyState("idle"), 1600);
+    } catch {
+      setCopyState("error");
+    }
+  }
+
   return (
     <aside className="detail">
       <div className="detail-head">
@@ -422,7 +440,18 @@ function RequestDetail({ request }: { request?: RequestListItem }) {
           <h2>#{request.id} {request.path}</h2>
           <p>{new Date(request.timestamp).toLocaleString()} · {request.durationMs}ms · rule {request.matchedRuleId ?? "fallback"}</p>
         </div>
-        <button title="Copy current panel" onClick={() => navigator.clipboard.writeText(panelText)}><Copy size={16} /></button>
+        <div className="detail-actions">
+          {copyState === "success" && <span className="copy-state success"><Check size={14} />Copied</span>}
+          {copyState === "error" && <span className="copy-state error">Copy failed</span>}
+          <button
+            aria-label={`Copy ${panel}`}
+            title={hasDetail ? `Copy ${panel}` : "Loading request details"}
+            disabled={!hasDetail}
+            onClick={() => void handleCopy()}
+          >
+            <Copy size={16} />
+          </button>
+        </div>
       </div>
       <div className="segmented">
         <button className={panel === "headers" ? "active" : ""} onClick={() => setPanel("headers")}>Headers</button>
